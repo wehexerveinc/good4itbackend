@@ -15,6 +15,9 @@ const taskRoutes = require("./routes/tasks");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Trust proxy - required for Vercel/cloud deployments behind reverse proxies
+app.set("trust proxy", 1);
+
 // Security middleware
 app.use(helmet());
 
@@ -48,11 +51,36 @@ app.use(express.urlencoded({ extended: true }));
 // Static file serving for uploaded proofs
 app.use("/uploads", express.static("uploads"));
 
-// Database connection
-mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/good4it")
-  .then(() => console.log("MongoDB connected successfully"))
-  .catch((err) => console.error("MongoDB connection error:", err));
+// Database connection - cached for serverless (Vercel)
+let cachedDb = null;
+
+async function connectToDatabase() {
+  if (cachedDb && mongoose.connection.readyState === 1) {
+    return cachedDb;
+  }
+
+  const db = await mongoose.connect(
+    process.env.MONGODB_URI || "mongodb://localhost:27017/good4it",
+    {
+      bufferCommands: false,
+    }
+  );
+
+  cachedDb = db;
+  console.log("MongoDB connected successfully");
+  return db;
+}
+
+// Middleware to ensure DB is connected before handling requests
+app.use(async (req, res, next) => {
+  try {
+    await connectToDatabase();
+    next();
+  } catch (err) {
+    console.error("MongoDB connection error:", err);
+    res.status(503).json({ message: "Database connection failed" });
+  }
+});
 
 // Routes
 app.use("/api/auth", authRoutes);
@@ -69,6 +97,26 @@ app.get("/api/health", (req, res) => {
     message: "Good4It Backend API is running",
     timestamp: new Date().toISOString(),
     cors: "CORS configured for React Native",
+  });
+});
+
+// DB diagnostic endpoint (remove after debugging)
+app.get("/api/db-check", async (req, res) => {
+  const uri = process.env.MONGODB_URI;
+  res.status(200).json({
+    mongoUriSet: !!uri,
+    mongoUriPrefix: uri ? uri.substring(0, 25) + "..." : "NOT SET",
+    connectionState: mongoose.connection.readyState,
+    connectionStates: {
+      0: "disconnected",
+      1: "connected",
+      2: "connecting",
+      3: "disconnecting",
+    },
+    currentState:
+      ["disconnected", "connected", "connecting", "disconnecting"][
+        mongoose.connection.readyState
+      ],
   });
 });
 
